@@ -1,0 +1,67 @@
+# ── Python ──────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+*.so
+*.whl
+
+# ── Environment & Secrets ──────────────────────────────────
+.env
+.env.*
+*.env
+!.env.example
+
+# ── Database Files ─────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+suppliers.db
+
+# ── RL Model Weights & Cache ──────────────────────────────
+*.pt
+*.pth
+*.pkl
+*.pickle
+agent_cache/
+trained_models/
+
+# ── IDE / Editor ───────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.agents/
+
+# ── OS Files ───────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ── Flutter / Dart ─────────────────────────────────────────
+storeops/.dart_tool/
+storeops/.packages
+storeops/build/
+storeops/.flutter-plugins
+storeops/.flutter-plugins-dependencies
+storeops/android/.gradle/
+storeops/android/app/build/
+storeops/android/local.properties
+storeops/ios/Pods/
+storeops/ios/.symlinks/
+storeops/ios/Flutter/Generated.xcconfig
+storeops/android/key.properties
+storeops/*.jks
+
+# ── Docker ─────────────────────────────────────────────────
+docker-compose.override.yml
+
+# ── Misc ───────────────────────────────────────────────────
+node_modules/
+*.log
+*.tmp

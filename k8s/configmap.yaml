@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: signal-core-config
+data:
+  KAFKA_SERVERS: "kafka:9092"
+  REDIS_URL: "redis://redis-master:6379/0"
+  DARK_STORE_MODE: "true"
+  MONSOON_THRESHOLD: "0.8"
