@@ -30,6 +30,13 @@ suppliers.db
 agent_cache/
 trained_models/
 
+# ── Large Data Files ───────────────────────────────────────
+# Keep only the sample dataset; ignore full-scale CSVs
+backend/*.csv
+!backend/test_suppliers.csv
+!backend/sample_data.csv
+SignalCoreAI/*.csv
+
 # ── IDE / Editor ───────────────────────────────────────────
 .vscode/
 .idea/
@@ -60,6 +67,11 @@ storeops/*.jks
 
 # ── Docker ─────────────────────────────────────────────────
 docker-compose.override.yml
+
+# ── Client-Specific / Private Strategy Docs ───────────────
+bigbasket_strategy.md
+scripts/simulate_bigbasket_signals.py
+backend/generate_bb_dataset.py
 
 # ── Misc ───────────────────────────────────────────────────
 node_modules/

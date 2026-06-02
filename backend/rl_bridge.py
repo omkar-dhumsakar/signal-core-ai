@@ -8,8 +8,12 @@ import sys
 import os
 import random
 import uuid
+import time
 import numpy as np
+import torch
 from datetime import datetime, date, timedelta
+import pickle
+from pydantic import BaseModel, Field
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -20,6 +24,21 @@ from SignalCoreAI.scm_engine import (
     train_agent_from_demand_series,
     get_category_sim_params,
     HOURLY_TARGETS,
+    DAILY_TARGETS,
+    SHELF_LIFE_HORIZON,
+)
+from SignalCoreAI.dqn_engine import (
+    DQNAgent,
+    train_dqn_stochastic,
+    train_dqn_from_demand_series,
+    PIPELINE_HORIZON,
+    MAX_PIPELINE_SEQUENCE,
+    DEFAULT_NUM_CATEGORIES,
+    DEFAULT_METADATA_DIM,
+)
+from SignalCoreAI.ppo_engine import PPOAgent, train_ppo_stochastic
+from SignalCoreAI.network_coordinator import (
+    NetworkCoordinator, StoreCapacity, SupplierCapacity,
 )
 from SignalCoreAI.data_utils import generate_demand_signals, load_sku_demand_profiles
 
@@ -83,8 +102,10 @@ _PRIORITY_WEIGHTS = {
 _DEFAULT_DAILY_BUDGET = 50000.0  # ₹50,000
 _VELOCITY_LABELS = ["Slow", "Medium", "Fast", "Ultra"]
 
-# ── Dark Store Mode ───────────────────────────────────────────────────
+# ── Dark Store Mode ─────────────────────────────────────────────────────────────
 DARK_STORE_MODE = True  # Set False for traditional retail mode
+USE_DQN = True          # True = neural DQN agents, False = tabular Q-learning
+USE_PPO = False         # True = continuous PPO agent (overrides USE_DQN when True)
 
 # Hourly RL action → retail quantity mapping (smaller, frequent orders)
 RL_TO_RETAIL_QTY_HOURLY = {
@@ -219,11 +240,14 @@ class StoreState:
 
 class RLBridge:
     def __init__(self):
-        self.agents: dict[str, QLearningAgent] = {}   # keyed by cluster
+        self.agents: dict = {}                        # keyed by category (DQN) or cluster (QL)
         self.sims: dict[str, StochasticSCMSimulator] = {}
         self._dynamic_catalog: dict = {}
         self.daily_budget: float = _DEFAULT_DAILY_BUDGET
-        self._sku_cluster: dict[str, str] = {}        # sku → cluster key
+        self._sku_cluster: dict[str, str] = {}        # sku → agent key
+        self._sku_to_idx: dict[str, int] = {}         # sku → DQN embedding index
+        self._cat_to_idx: dict[str, int] = {}         # category → DQN category embedding index
+        self._sku_metadata: dict[str, np.ndarray] = {}  # sku → metadata vector
 
         # Multi-store support
         self.stores: dict[str, StoreState] = {}
@@ -236,6 +260,21 @@ class RLBridge:
         
         self.is_training: bool = False
         self._directive_cache: dict[str, dict] = {} # store_id -> {timestamp, directives}
+
+        # ── Network Coordinator (Fix #5: multi-echelon constraints) ──
+        store_caps = {}
+        for ds in self.dark_stores:
+            store_caps[ds.store_id] = StoreCapacity(
+                store_id=ds.store_id,
+                max_inbound_units=10000 if ds.facility_type == "cdc" else 3000,
+                max_storage_units=50000 if ds.facility_type == "cdc" else 15000,
+                facility_type=ds.facility_type,
+                parent_cdc=ds.parent_cdc,
+            )
+        self.coordinator = NetworkCoordinator(store_capacities=store_caps)
+
+        # PPO agents (separate from DQN agents)
+        self._ppo_agents: dict = {}  # keyed by category
 
     @property
     def inventory_state(self) -> dict:
@@ -262,15 +301,33 @@ class RLBridge:
             store = self.stores[ds.store_id]
             for sku, info in PRODUCT_CATALOG.items():
                 stock = info["base_stock"]
-                # Each store gets slightly different stock levels
                 seed_offset = hash(ds.store_id + sku) % 20 - 10
                 variance = random.randint(-int(stock * 0.3), int(stock * 0.1)) + seed_offset
                 shelf_life = _SHELF_LIFE_HOURS.get(info["category"], _DEFAULT_SHELF_LIFE)
-                # Simulate oldest batch age (random fraction of shelf life)
                 batch_age_hours = random.randint(1, max(1, int(shelf_life * 0.6)))
+                
+                qty = max(5, stock + variance)
+                age_matrix = np.zeros(SHELF_LIFE_HORIZON, dtype=np.float32)
+                fresh_overflow = 0.0
+                
+                # Assign initial inventory to a bucket based on simulated shelf life remaining
+                rem_life = max(1, shelf_life - batch_age_hours)
+                if rem_life <= SHELF_LIFE_HORIZON:
+                    age_matrix[rem_life - 1] = qty
+                else:
+                    fresh_overflow = float(qty)
+
+                pipeline_seq = []
+                init_pipe = random.choice([0, 0, 0, 10, 20, 30])
+                if init_pipe > 0:
+                    arrival_slot = random.randint(1, min(5, PIPELINE_HORIZON - 1))
+                    pipeline_seq.append([init_pipe, arrival_slot])
                 store.inventory_state[sku] = {
-                    "on_hand": max(5, stock + variance),
-                    "pipeline": random.choice([0, 0, 0, 10, 20, 30]),
+                    "age_matrix": age_matrix.tolist(),
+                    "fresh_overflow": fresh_overflow,
+                    "on_hand": float(np.sum(age_matrix) + fresh_overflow),
+                    "pipeline_seq": pipeline_seq,
+                    "pipeline_sum": float(init_pipe),
                     "signal": random.choice([0, 0, 1]),
                     "oldest_batch_hours": batch_age_hours,
                     "shelf_life_hours": shelf_life,
@@ -291,10 +348,25 @@ class RLBridge:
                 }
                 # Initialize inventory with random variance
                 variance = random.randint(-int(base_stock * 0.5), int(base_stock * 0.2))
+                qty = max(5, base_stock + variance)
+                
+                shelf_life = _SHELF_LIFE_HOURS.get(category, _DEFAULT_SHELF_LIFE)
+                age_matrix = np.zeros(SHELF_LIFE_HORIZON, dtype=np.float32)
+                fresh_overflow = 0.0
+                if shelf_life <= SHELF_LIFE_HORIZON:
+                    age_matrix[max(0, shelf_life - 1)] = qty
+                else:
+                    fresh_overflow = float(qty)
+
                 self.inventory_state[sku] = {
-                    "on_hand": max(5, base_stock + variance),
-                    "pipeline": random.choice([0, 0, 0, 5, 10]),
+                    "age_matrix": age_matrix.tolist(),
+                    "fresh_overflow": fresh_overflow,
+                    "on_hand": float(np.sum(age_matrix) + fresh_overflow),
+                    "pipeline_seq": [],
+                    "pipeline_sum": random.choice([0, 0, 0, 5, 10]),
                     "signal": random.choice([0, 0, 0, 1]),
+                    "oldest_batch_hours": 0,
+                    "shelf_life_hours": shelf_life,
                 }
                 new_count += 1
         return new_count
@@ -354,33 +426,190 @@ class RLBridge:
 
         return clusters
 
-    _CACHE_PATH = os.path.join(os.path.dirname(__file__), ".rl_cache.pkl")
+    _QL_CACHE_PATH = os.path.join(os.path.dirname(__file__), ".rl_cache.pkl")
+    _DQN_CACHE_PATH = os.path.join(os.path.dirname(__file__), ".dqn_cache.pt")
+
+    @property
+    def _CACHE_PATH(self):
+        """Backward-compat alias used by old references."""
+        return self._DQN_CACHE_PATH if USE_DQN else self._QL_CACHE_PATH
 
     def load_or_train_agents(self, force=False):
-        """Train one Q-table per demand cluster, or load from cache."""
+        """Train RL agents and cache for fast restart.
+
+        When USE_DQN is True, trains one DQNAgent per product category
+        with per-SKU embeddings.  Otherwise falls back to tabular
+        Q-Learning agents per (category × velocity) cluster.
+        """
         import pickle, time
-        
+
         self.is_training = True
 
-        # Try loading from cache first (if not forcing retrain)
-        if not force and os.path.exists(self._CACHE_PATH):
+        if USE_DQN:
+            self._load_or_train_dqn(force)
+        else:
+            self._load_or_train_ql(force)
+
+        self.is_training = False
+
+    # ── DQN training path ─────────────────────────────────────────
+
+    def _load_or_train_dqn(self, force=False):
+        import time
+
+        # Try loading cached DQN weights
+        if not force and os.path.exists(self._DQN_CACHE_PATH):
             try:
-                with open(self._CACHE_PATH, "rb") as f:
+                cached = torch.load(self._DQN_CACHE_PATH, map_location="cpu",
+                                    weights_only=False)
+                self._sku_cluster = cached["sku_cluster"]
+                self._sku_to_idx = cached["sku_to_idx"]
+                self._cat_to_idx = cached.get("cat_to_idx", {})
+                self._sku_metadata = cached.get("sku_metadata", {})
+                self.sims = cached["sims"]
+                targets = HOURLY_TARGETS if DARK_STORE_MODE else None
+
+                for cat, state in cached["agent_states"].items():
+                    agent = DQNAgent(
+                        targets=targets or [0, 2500, 5000, 7500, 10000, 15000],
+                        num_skus=state["num_skus"],
+                        embedding_dim=16,
+                        num_categories=state.get("num_categories", DEFAULT_NUM_CATEGORIES),
+                        pipeline_horizon=state.get("pipeline_horizon", PIPELINE_HORIZON),
+                        use_prioritized_replay=True,
+                    )
+                    agent.policy_net.load_state_dict(state["policy_net"])
+                    agent.target_net.load_state_dict(state["policy_net"])
+                    agent.epsilon = state["epsilon"]
+                    self.agents[cat] = agent
+
+                print(f"[rl_bridge] Loaded {len(self.agents)} DQN v2 agents from cache")
+                return
+            except Exception as e:
+                print(f"[rl_bridge] DQN cache load failed ({e}), retraining...")
+
+        t0 = time.time()
+        catalog = self.get_full_catalog()
+
+        # Group SKUs by category
+        cat_skus: dict[str, list[str]] = {}
+        for sku, info in catalog.items():
+            cat = info["category"]
+            cat_skus.setdefault(cat, []).append(sku)
+
+        # Assign embedding indices, category indices, and metadata
+        cat_counter = 0
+        for cat, skus in cat_skus.items():
+            if cat not in self._cat_to_idx:
+                self._cat_to_idx[cat] = cat_counter
+                cat_counter += 1
+            for idx, sku in enumerate(skus):
+                self._sku_to_idx[sku] = idx
+                self._sku_cluster[sku] = cat
+                # Build metadata vector: [price_tier, lead_time_norm, shelf_life_norm, avg_sales_norm]
+                info = catalog[sku]
+                lo, hi = _CATEGORY_COST.get(cat, _DEFAULT_COST_RANGE)
+                price_tier = (info.get("unit_cost", (lo+hi)/2) - lo) / max(hi - lo, 1)
+                lead_norm = min(info.get("lead_time", 3) / 14.0, 1.0)
+                shelf_hours = _SHELF_LIFE_HOURS.get(cat, _DEFAULT_SHELF_LIFE)
+                shelf_norm = min(shelf_hours / 8760.0, 1.0)  # Normalize to 1 year
+                sales_norm = min(info.get("avg_daily_sales", 50) / 200.0, 1.0)
+                self._sku_metadata[sku] = np.array(
+                    [price_tier, lead_norm, shelf_norm, sales_norm], dtype=np.float32
+                )
+
+        # DQN uses synthetic data for fast initial training.
+        # Real demand adaptation happens via online refinement (Kafka events).
+        targets = HOURLY_TARGETS if DARK_STORE_MODE else None
+
+        for cat, skus in cat_skus.items():
+            h, s, sp, wc = get_category_sim_params(cat)
+            lead_times = [catalog[sk].get("lead_time", 3) for sk in skus]
+            avg_lead = max(1, int(round(sum(lead_times) / len(lead_times))))
+            if DARK_STORE_MODE:
+                avg_lead *= 8
+
+            sim = StochasticSCMSimulator(
+                lead_time=avg_lead, holding_cost=h, stockout_cost=s,
+                spoilage_rate=sp, waste_unit_cost=wc,
+                time_unit="hours" if DARK_STORE_MODE else "days",
+            )
+
+            agent = DQNAgent(
+                targets=targets or [0, 2500, 5000, 7500, 10000, 15000],
+                num_skus=len(skus),
+                embedding_dim=16,
+                num_categories=max(len(cat_skus), DEFAULT_NUM_CATEGORIES),
+                pipeline_horizon=PIPELINE_HORIZON,
+                use_prioritized_replay=True,
+            )
+
+            # Fast training: 5 representative SKUs × 2 epochs of synthetic data
+            sample_count = min(5, len(skus))
+            train_skus = skus[:sample_count]
+
+            for sku in train_skus:
+                sku_idx = self._sku_to_idx[sku]
+                cat_idx = self._cat_to_idx.get(cat, 0)
+                metadata = self._sku_metadata.get(sku)
+                df_synth = generate_demand_signals(days=30)
+                train_dqn_stochastic(sim, agent, df_synth,
+                                    sku_id=sku_idx, cat_id=cat_idx,
+                                    metadata=metadata, epochs=2)
+
+            agent.epsilon = 0.05
+            self.agents[cat] = agent
+            self.sims[cat] = sim
+            print(f"[rl_bridge] DQN trained: {cat} ({len(skus)} SKUs, "
+                  f"sampled {sample_count})")
+
+        elapsed = time.time() - t0
+        print(f"[rl_bridge] Trained {len(self.agents)} DQN agents in {elapsed:.1f}s")
+
+        # Save DQN cache
+        try:
+            agent_states = {}
+            for cat, agent in self.agents.items():
+                agent_states[cat] = {
+                    "policy_net": agent.policy_net.state_dict(),
+                    "epsilon": agent.epsilon,
+                    "num_skus": agent.policy_net.sku_embedding.num_embeddings,
+                    "num_categories": agent.policy_net.cat_embedding.num_embeddings,
+                    "pipeline_horizon": agent.pipeline_horizon,
+                }
+            torch.save({
+                "agent_states": agent_states,
+                "sims": self.sims,
+                "sku_cluster": self._sku_cluster,
+                "sku_to_idx": self._sku_to_idx,
+                "cat_to_idx": self._cat_to_idx,
+                "sku_metadata": self._sku_metadata,
+            }, self._DQN_CACHE_PATH)
+            print(f"[rl_bridge] DQN cache saved to {self._DQN_CACHE_PATH}")
+        except Exception as e:
+            print(f"[rl_bridge] DQN cache save failed: {e}")
+
+    # ── Q-Learning training path (fallback) ───────────────────────
+
+    def _load_or_train_ql(self, force=False):
+        import pickle, time
+
+        if not force and os.path.exists(self._QL_CACHE_PATH):
+            try:
+                with open(self._QL_CACHE_PATH, "rb") as f:
                     cached = pickle.load(f)
                 self.agents = cached["agents"]
                 self.sims = cached["sims"]
                 self._sku_cluster = cached["sku_cluster"]
-                print(f"[rl_bridge] Loaded {len(self.agents)} agents from cache (instant)")
-                self.is_training = False
+                print(f"[rl_bridge] Loaded {len(self.agents)} QL agents from cache")
                 return
             except Exception as e:
-                print(f"[rl_bridge] Cache load failed ({e}), retraining...")
+                print(f"[rl_bridge] QL cache load failed ({e}), retraining...")
 
         t0 = time.time()
         catalog = self.get_full_catalog()
         clusters = self._build_clusters(catalog)
 
-        # Load real demand profiles from CSV
         try:
             profiles = load_sku_demand_profiles(_CSV_PATH)
             use_real_data = True
@@ -388,22 +617,18 @@ class RLBridge:
         except Exception as e:
             profiles = {}
             use_real_data = False
-            print(f"[rl_bridge] WARNING: Could not load demand profiles ({e}), using synthetic data")
+            print(f"[rl_bridge] WARNING: Could not load demand profiles ({e})")
 
         for cluster_key, sku_list in clusters.items():
             cat = cluster_key.rsplit("_", 1)[0]
             h, s, sp, wc = get_category_sim_params(cat)
-
             lead_times = [catalog[sk].get("lead_time", 3) for sk in sku_list]
             avg_lead = max(1, int(round(sum(lead_times) / len(lead_times))))
-
             if DARK_STORE_MODE:
-                avg_lead_final = avg_lead * 8
-            else:
-                avg_lead_final = avg_lead
+                avg_lead *= 8
 
             sim = StochasticSCMSimulator(
-                lead_time=avg_lead_final, holding_cost=h, stockout_cost=s,
+                lead_time=avg_lead, holding_cost=h, stockout_cost=s,
                 spoilage_rate=sp, waste_unit_cost=wc,
                 time_unit="hours" if DARK_STORE_MODE else "days",
             )
@@ -414,7 +639,6 @@ class RLBridge:
             if use_real_data:
                 demands = [profiles[sk]["demand"] for sk in sku_list if sk in profiles]
                 signals = [profiles[sk]["promo_signal"] for sk in sku_list if sk in profiles]
-
                 if demands:
                     min_len = min(len(d) for d in demands)
                     avg_demand = np.mean([d[:min_len] for d in demands], axis=0)
@@ -433,24 +657,21 @@ class RLBridge:
             self.sims[cluster_key] = sim
 
         elapsed = time.time() - t0
-        print(f"[rl_bridge] Trained {len(self.agents)} cluster agents in {elapsed:.1f}s")
+        print(f"[rl_bridge] Trained {len(self.agents)} QL cluster agents in {elapsed:.1f}s")
 
-        # Save to cache for instant next startup
         try:
-            with open(self._CACHE_PATH, "wb") as f:
+            with open(self._QL_CACHE_PATH, "wb") as f:
                 pickle.dump({
                     "agents": self.agents,
                     "sims": self.sims,
                     "sku_cluster": self._sku_cluster,
                 }, f)
-            print(f"[rl_bridge] Saved cache to {self._CACHE_PATH}")
+            print(f"[rl_bridge] QL cache saved to {self._QL_CACHE_PATH}")
         except Exception as e:
-            print(f"[rl_bridge] Cache save failed: {e}")
-            
-        self.is_training = False
+            print(f"[rl_bridge] QL cache save failed: {e}")
 
-    def _get_agent_for_sku(self, sku: str) -> QLearningAgent:
-        """Return the cluster-specific agent for a SKU."""
+    def _get_agent_for_sku(self, sku: str):
+        """Return the agent for a SKU (DQN or QLearning depending on mode)."""
         cluster = self._sku_cluster.get(sku)
         if cluster and cluster in self.agents:
             return self.agents[cluster]
@@ -458,35 +679,146 @@ class RLBridge:
         # Fallback: find by category
         catalog = self.get_full_catalog()
         cat = catalog.get(sku, {}).get("category", "Grocery")
-        # Try any cluster matching that category
+        # Try any agent key matching that category
         for key, agent in self.agents.items():
-            if key.startswith(cat):
+            if key.startswith(cat) or key == cat:
                 return agent
 
-        # Last resort: lazy-init a new agent
+        # Last resort: lazy-init a new agent for this category
         h, s, sp, wc = get_category_sim_params(cat)
         lead_time = catalog.get(sku, {}).get("lead_time", 3)
         self.sims[cat] = StochasticSCMSimulator(
             lead_time=lead_time, holding_cost=h, stockout_cost=s,
             spoilage_rate=sp, waste_unit_cost=wc,
         )
-        agent = QLearningAgent()
-        df_synth = generate_demand_signals(days=90)
-        train_agent_stochastic(self.sims[cat], agent, df_synth, epochs=30)
-        agent.epsilon = 0.05
+
+        if USE_DQN:
+            agent = DQNAgent(
+                targets=HOURLY_TARGETS if DARK_STORE_MODE else [0, 2500, 5000, 7500, 10000, 15000],
+                num_skus=100,  # generous default
+                embedding_dim=16,
+                num_categories=DEFAULT_NUM_CATEGORIES,
+                pipeline_horizon=PIPELINE_HORIZON,
+                use_prioritized_replay=True,
+            )
+            cat_idx = self._cat_to_idx.get(cat, 0)
+            # Build minimal metadata for this SKU
+            info = catalog.get(sku, {})
+            sales_norm = min(info.get("avg_daily_sales", 50) / 200.0, 1.0)
+            lead_norm = min(info.get("lead_time", 3) / 14.0, 1.0)
+            metadata = np.array([0.5, lead_norm, 0.5, sales_norm], dtype=np.float32)
+            self._sku_metadata[sku] = metadata
+
+            df_synth = generate_demand_signals(days=60)
+            train_dqn_stochastic(self.sims[cat], agent, df_synth,
+                                sku_id=0, cat_id=cat_idx,
+                                metadata=metadata, epochs=3)
+            agent.epsilon = 0.05
+            self._sku_to_idx[sku] = 0
+        else:
+            agent = QLearningAgent()
+            df_synth = generate_demand_signals(days=90)
+            train_agent_stochastic(self.sims[cat], agent, df_synth, epochs=30)
+            agent.epsilon = 0.05
+
         self.agents[cat] = agent
         self._sku_cluster[sku] = cat
         return agent
 
-    def _get_rl_action(self, sku: str, store_id: str | None = None) -> int:
+    def _get_ppo_agent_for_sku(self, sku: str) -> PPOAgent:
+        """Return or lazy-init a PPO agent for a SKU's category."""
+        cat = self._sku_cluster.get(sku)
+        if not cat:
+            catalog = self.get_full_catalog()
+            cat = catalog.get(sku, {}).get("category", "Grocery")
+            self._sku_cluster[sku] = cat
+
+        if cat in self._ppo_agents:
+            return self._ppo_agents[cat]
+
+        # Lazy-init: create and train a new PPO agent for this category
+        catalog = self.get_full_catalog()
+        cat_skus = [s for s, info in catalog.items() if info["category"] == cat]
+
+        h, s, sp, wc = get_category_sim_params(cat)
+        lead_times = [catalog[sk].get("lead_time", 3) for sk in cat_skus]
+        avg_lead = max(1, int(round(sum(lead_times) / max(len(lead_times), 1))))
+        if DARK_STORE_MODE:
+            avg_lead *= 8
+
+        sim = StochasticSCMSimulator(
+            lead_time=avg_lead, holding_cost=h, stockout_cost=s,
+            spoilage_rate=sp, waste_unit_cost=wc,
+            time_unit="hours" if DARK_STORE_MODE else "days",
+        )
+
+        max_qty = max(HOURLY_TARGETS) if DARK_STORE_MODE else 15000
+        ppo_agent = PPOAgent(
+            num_skus=max(len(cat_skus), 100),
+            max_order_qty=float(max_qty),
+            num_categories=DEFAULT_NUM_CATEGORIES,
+            pipeline_horizon=PIPELINE_HORIZON,
+        )
+
+        # Quick training on synthetic data
+        df_synth = generate_demand_signals(days=30)
+        sku_idx = self._sku_to_idx.get(sku, 0)
+        cat_idx = self._cat_to_idx.get(cat, 0)
+        metadata = self._sku_metadata.get(sku)
+        train_ppo_stochastic(sim, ppo_agent, df_synth,
+                            sku_id=sku_idx, cat_id=cat_idx,
+                            metadata=metadata, epochs=3)
+
+        self._ppo_agents[cat] = ppo_agent
+        print(f"[rl_bridge] PPO agent trained for category: {cat}")
+        return ppo_agent
+
+    def _get_rl_action(self, sku: str, store_id: str | None = None) -> int | float:
         store = self._get_store(store_id)
         state = store.inventory_state[sku]
-        inv_scaled = state["on_hand"] * 50
-        pipe_scaled = state["pipeline"] * 50
+        
+        age_mat = np.asarray(state.get("age_matrix", np.zeros(SHELF_LIFE_HORIZON)), dtype=np.float32) * 50
+        fresh_ovr = state.get("fresh_overflow", 0.0) * 50
+        inv_scaled = float(np.sum(age_mat) + fresh_ovr)
+
+        pad_seq = lambda seq: np.array([[q * 50, eta] for q, eta in seq] + [[0.0, 0.0]] * max(0, MAX_PIPELINE_SEQUENCE - len(seq)), dtype=np.float32).flatten()
+
+        # ── PPO path: continuous action ──
+        if USE_PPO:
+            cat = self._sku_cluster.get(sku, "Grocery")
+            ppo_agent = self._get_ppo_agent_for_sku(sku)
+            pipeline_seq = pad_seq(state.get("pipeline_seq", []))
+            sku_idx = self._sku_to_idx.get(sku, 0)
+            cat_idx = self._cat_to_idx.get(cat, 0)
+            metadata = self._sku_metadata.get(sku)
+            action_qty, _, _ = ppo_agent.act(
+                age_mat, fresh_ovr, pipeline_seq, state["signal"],
+                sku_id=sku_idx, cat_id=cat_idx,
+                metadata=metadata, explore=False,
+            )
+            # PPO returns continuous qty — round to int for retail
+            return max(0, round(action_qty))
+
+        # ── DQN path: discrete action ──
         agent = self._get_agent_for_sku(sku)
-        raw_action = agent.act(
-            inv_scaled, pipe_scaled, state["signal"], explore=False
-        )
+
+        if USE_DQN and isinstance(agent, DQNAgent):
+            sku_idx = self._sku_to_idx.get(sku, 0)
+            cat = self._sku_cluster.get(sku, "Grocery")
+            cat_idx = self._cat_to_idx.get(cat, 0)
+            metadata = self._sku_metadata.get(sku)
+            pipeline_seq = pad_seq(state.get("pipeline_seq", []))
+            raw_action = agent.act(
+                age_mat, fresh_ovr, pipeline_seq, state["signal"],
+                sku_id=sku_idx, cat_id=cat_idx,
+                metadata=metadata, explore=False,
+            )
+        else:
+            pipe_scaled = float(np.sum(state["pipeline"])) * 50 if isinstance(state["pipeline"], (np.ndarray, list)) else state.get("pipeline_sum", 0) * 50
+            raw_action = agent.act(
+                inv_scaled, pipe_scaled, state["signal"], explore=False,
+            )
+
         if DARK_STORE_MODE:
             return RL_TO_RETAIL_QTY_HOURLY.get(raw_action, 10)
         return RL_TO_RETAIL_QTY.get(raw_action, 25)
@@ -494,9 +826,47 @@ class RLBridge:
     def _get_rl_confidence(self, sku: str, store_id: str | None = None) -> float:
         store = self._get_store(store_id)
         state = store.inventory_state[sku]
-        inv_scaled = state["on_hand"] * 50
-        pipe_scaled = state["pipeline"] * 50
         agent = self._get_agent_for_sku(sku)
+        
+        age_mat = np.asarray(state.get("age_matrix", np.zeros(SHELF_LIFE_HORIZON)), dtype=np.float32) * 50
+        fresh_ovr = state.get("fresh_overflow", 0.0) * 50
+        pad_seq = lambda seq: np.array([[q * 50, eta] for q, eta in seq] + [[0.0, 0.0]] * max(0, MAX_PIPELINE_SEQUENCE - len(seq)), dtype=np.float32).flatten()
+
+        if USE_PPO:
+            ppo_agent = self._get_ppo_agent_for_sku(sku)
+            pipeline_seq = pad_seq(state.get("pipeline_seq", []))
+            from SignalCoreAI.dqn_engine import _build_state_array
+            state_arr = _build_state_array(age_mat, fresh_ovr, state["signal"], pipeline_seq)
+            state_t = torch.FloatTensor(state_arr).unsqueeze(0).to(ppo_agent.device)
+            sku_t = torch.LongTensor([self._sku_to_idx.get(sku, 0)]).to(ppo_agent.device)
+            cat = self._sku_cluster.get(sku, "Grocery")
+            cat_t = torch.LongTensor([self._cat_to_idx.get(cat, 0)]).to(ppo_agent.device)
+            metadata = self._sku_metadata.get(sku)
+            meta_t = torch.FloatTensor([metadata if metadata is not None else np.zeros(DEFAULT_METADATA_DIM)]).to(ppo_agent.device)
+            with torch.no_grad():
+                mean, std, _ = ppo_agent.network(state_t, sku_t, cat_t, meta_t)
+            confidence = 1.0 / (1.0 + float(std.item()) / max(float(mean.item()), 1.0))
+            return round(min(0.99, max(0.1, confidence)), 2)
+
+        if USE_DQN and isinstance(agent, DQNAgent):
+            sku_idx = self._sku_to_idx.get(sku, 0)
+            cat = self._sku_cluster.get(sku, "Grocery")
+            cat_idx = self._cat_to_idx.get(cat, 0)
+            metadata = self._sku_metadata.get(sku)
+            pipeline_seq = pad_seq(state.get("pipeline_seq", []))
+            
+            from SignalCoreAI.dqn_engine import _build_state_array
+            state_arr = _build_state_array(age_mat, fresh_ovr, state["signal"], pipeline_seq)
+            state_t = torch.FloatTensor(state_arr).unsqueeze(0).to(agent.device)
+            sku_t = torch.LongTensor([sku_idx]).to(agent.device)
+            cat_t = torch.LongTensor([cat_idx]).to(agent.device)
+            meta_t = torch.FloatTensor([metadata if metadata is not None else np.zeros(DEFAULT_METADATA_DIM)]).to(agent.device)
+            with torch.no_grad():
+                q_vals = agent.policy_net(state_t, sku_t, cat_t, meta_t).squeeze()
+            probs = torch.softmax(q_vals, dim=0)
+            return round(float(probs.max().item()), 2)
+
+        # Tabular Q-learning fallback
         s = agent.get_state(inv_scaled, pipe_scaled, state["signal"])
         if s in agent.q:
             q_vals = agent.q[s]
@@ -629,24 +999,77 @@ class RLBridge:
         actionable_set = set(skus[i] for i, mask in enumerate(needs_action_mask) if mask)
         # ----------------------------------------------------------------
 
-        directives = []
-
-        for sku, info in catalog.items():
-            # Apply category filter if provided
-            if category_filter and info["category"] != category_filter:
+        # ── Batched RL Inference ──
+        actionable_list = []
+        for sku in catalog:
+            if category_filter and catalog[sku]["category"] != category_filter:
                 continue
-
             if sku not in store.inventory_state:
                 continue
+            if sku in actionable_set or self._get_expiry_risk(sku, store.store_id) in ("yellow", "red"):
+                actionable_list.append(sku)
+
+        rec_qty_map = {}
+        conf_map = {}
+        agent_to_skus = {}
+        
+        for sku in actionable_list:
+            if USE_PPO:
+                cat = self._sku_cluster.get(sku) or catalog[sku].get("category", "Grocery")
+                self._sku_cluster[sku] = cat
+                agent_to_skus.setdefault(cat, []).append(sku)
+            else:
+                agent = self._get_agent_for_sku(sku)
+                agent_to_skus.setdefault(agent, []).append(sku)
+
+        if USE_PPO:
+            for cat, batch_skus in agent_to_skus.items():
+                ppo_agent = self._get_ppo_agent_for_sku(batch_skus[0])
+                pad_seq = lambda seq: np.array([[q * 50, eta] for q, eta in seq] + [[0.0, 0.0]] * max(0, MAX_PIPELINE_SEQUENCE - len(seq)), dtype=np.float32).flatten()
                 
+                age_mats = [np.asarray(store.inventory_state[s].get("age_matrix", np.zeros(SHELF_LIFE_HORIZON))) * 50 for s in batch_skus]
+                fresh_ovrs = [store.inventory_state[s].get("fresh_overflow", 0.0) * 50 for s in batch_skus]
+                seqs = [pad_seq(store.inventory_state[s].get("pipeline_seq", [])) for s in batch_skus]
+                sigs = [store.inventory_state[s]["signal"] for s in batch_skus]
+                sku_ids = [self._sku_to_idx.get(s, 0) for s in batch_skus]
+                cat_ids = [self._cat_to_idx.get(self._sku_cluster.get(s, "Grocery"), 0) for s in batch_skus]
+                metas = [self._sku_metadata.get(s, np.zeros(DEFAULT_METADATA_DIM)) for s in batch_skus]
+                
+                actions, confs = ppo_agent.act_batched(age_mats, fresh_ovrs, seqs, sigs, sku_ids, cat_ids, metas, explore=False)
+                for s, a, c in zip(batch_skus, actions, confs):
+                    rec_qty_map[s] = max(0, round(a))
+                    conf_map[s] = round(c, 2)
+        else:
+            for agent, batch_skus in agent_to_skus.items():
+                if USE_DQN and isinstance(agent, DQNAgent):
+                    pad_seq = lambda seq: np.array([[q * 50, eta] for q, eta in seq] + [[0.0, 0.0]] * max(0, MAX_PIPELINE_SEQUENCE - len(seq)), dtype=np.float32).flatten()
+                    
+                    age_mats = [np.asarray(store.inventory_state[s].get("age_matrix", np.zeros(SHELF_LIFE_HORIZON))) * 50 for s in batch_skus]
+                    fresh_ovrs = [store.inventory_state[s].get("fresh_overflow", 0.0) * 50 for s in batch_skus]
+                    seqs = [pad_seq(store.inventory_state[s].get("pipeline_seq", [])) for s in batch_skus]
+                    sigs = [store.inventory_state[s]["signal"] for s in batch_skus]
+                    sku_ids = [self._sku_to_idx.get(s, 0) for s in batch_skus]
+                    cat_ids = [self._cat_to_idx.get(self._sku_cluster.get(s, "Grocery"), 0) for s in batch_skus]
+                    metas = [self._sku_metadata.get(s, np.zeros(DEFAULT_METADATA_DIM)) for s in batch_skus]
+                    
+                    raw_actions, confs = agent.act_batched(age_mats, fresh_ovrs, seqs, sigs, sku_ids, cat_ids, metas, explore=False)
+                    for s, ra, c in zip(batch_skus, raw_actions, confs):
+                        rec_qty_map[s] = RL_TO_RETAIL_QTY_HOURLY.get(ra, 10) if DARK_STORE_MODE else RL_TO_RETAIL_QTY.get(ra, 25)
+                        conf_map[s] = round(c, 2)
+                else:
+                    for s in batch_skus:
+                        rec_qty_map[s] = self._get_rl_action(s, store.store_id)
+                        conf_map[s] = self._get_rl_confidence(s, store.store_id)
+        # ──────────────────────────
+
+        directives = []
+
+        for sku in actionable_list:
+            info = catalog[sku]
             state = store.inventory_state[sku]
             expiry_risk = self._get_expiry_risk(sku, store.store_id)
             
-            # Combine Tensor bool with Python string check
-            if sku not in actionable_set and expiry_risk not in ("yellow", "red"):
-                continue
-
-            rec_qty = self._get_rl_action(sku, store.store_id)
+            rec_qty = rec_qty_map[sku]
             
             # Hub vs CDC routing logic
             store_model = next((s for s in self.dark_stores if s.store_id == store.store_id), None)
@@ -699,7 +1122,7 @@ class RLBridge:
                     sku=sku,
                     product_name=info["name"],
                     current_stock=state["on_hand"],
-                    pipeline_stock=state["pipeline"],
+                    pipeline_stock=int(state.get("pipeline_sum", 0)),
                     reason=reason,
                     priority=priority,
                     recommended_qty=rec_qty,
@@ -707,10 +1130,10 @@ class RLBridge:
                     estimated_arrival=date.today() + timedelta(days=sku_lead_days),
                     rl_state={
                         "inventory": state["on_hand"],
-                        "pipeline": state["pipeline"],
+                        "pipeline": int(state.get("pipeline_sum", 0)),
                         "signal": state["signal"],
                     },
-                    rl_confidence=self._get_rl_confidence(sku, store.store_id),
+                    rl_confidence=conf_map[sku],
                     store_id=store.store_id,
                     lead_time_hours=lead_time_hours,
                     shelf_life_hours=shelf_life_h,

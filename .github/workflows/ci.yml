@@ -1,0 +1,74 @@
+name: Signal Core AI CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  backend-tests:
+    name: Backend CI (FastAPI & RL)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        cd backend
+        pip install -r requirements.txt
+        pip install pytest black ruff
+        
+    - name: Lint with Ruff
+      run: |
+        cd backend
+        ruff check .
+        
+    - name: Format with Black
+      run: |
+        cd backend
+        black --check .
+        
+    - name: Run Tests
+      run: |
+        cd backend
+        pytest --disable-warnings
+
+  flutter-analyze:
+    name: Frontend CI (Flutter)
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.22.x'
+        channel: 'stable'
+        
+    - name: Install dependencies
+      run: |
+        cd storeops
+        flutter pub get
+        
+    - name: Check Formatting
+      run: |
+        cd storeops
+        dart format --output=none --set-exit-if-changed .
+        
+    - name: Analyze
+      run: |
+        cd storeops
+        flutter analyze

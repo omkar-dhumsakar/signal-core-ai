@@ -221,7 +221,7 @@ def _process_pos_batch(batch: POSSaleBatch):
             updated_stores.add(item.store_id)
 
     if updated_stores:
-        bridge._directives_cache.clear()
+        bridge._directive_cache.clear()
 
 @app.post("/api/v1/webhooks/pos-sale")
 def handle_pos_sale(batch: POSSaleBatch, background_tasks: BackgroundTasks):
@@ -242,7 +242,7 @@ def _process_inbound_qc(payload: InboundQCPayload):
     state["pipeline"] = max(0, state["pipeline"] - payload.received_qty)
 
     if payload.rejected_qty > 0:
-        bridge._directives_cache.clear()
+        bridge._directive_cache.clear()
 
 @app.post("/api/v1/inventory/inbound-qc")
 def handle_inbound_qc(payload: InboundQCPayload, background_tasks: BackgroundTasks):
@@ -258,7 +258,7 @@ def _process_forward_demand(payload: ForwardDemandPayload):
         return
     state = store.inventory_state[payload.sku]
     state["forward_booked"] = state.get("forward_booked", 0) + payload.reserved_qty
-    bridge._directives_cache.clear()
+    bridge._directive_cache.clear()
 
 @app.post("/api/v1/webhooks/forward-demand")
 def handle_forward_demand(payload: ForwardDemandPayload, background_tasks: BackgroundTasks):
@@ -371,16 +371,22 @@ def list_products():
 
 @app.get("/health")
 def health():
+    from rl_bridge import USE_DQN, DARK_STORE_MODE
     return {
         "status": "healthy",
-        "dark_store_mode": bridge.dark_store_mode,
+        "dark_store_mode": DARK_STORE_MODE,
+        "agent_type": "DQN" if USE_DQN else "Q-Learning",
         "stores": len(bridge.stores),
         "cluster_agents": {
-            cluster: len(agent.q)
+            cluster: "DQNAgent" if USE_DQN else len(agent.q)
             for cluster, agent in bridge.agents.items()
         },
         "clusters_count": len(bridge.agents),
-        "total_q_entries": sum(len(a.q) for a in bridge.agents.values()),
+        "total_parameters": sum(
+            sum(p.numel() for p in a.policy_net.parameters())
+            for a in bridge.agents.values()
+            if hasattr(a, "policy_net")
+        ) if USE_DQN else sum(len(a.q) for a in bridge.agents.values()),
         "products_tracked": len(bridge.get_full_catalog()),
         "pending_feedback": len(bridge.feedback_log),
         "daily_budget": bridge.daily_budget,

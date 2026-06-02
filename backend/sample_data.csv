@@ -1,0 +1,61 @@
+sku_id,sku_name,category,daily_sales,supplier_lead_time_days,store_id
+SKU-000001,Banana Robusta,Fruits & Vegetables,120.5,2,STORE-CENTRAL
+SKU-000001,Banana Robusta,Fruits & Vegetables,85.3,2,STORE-NORTH
+SKU-000001,Banana Robusta,Fruits & Vegetables,92.0,2,STORE-SOUTH
+SKU-000002,Tomato Local,Fruits & Vegetables,98.7,1,STORE-CENTRAL
+SKU-000002,Tomato Local,Fruits & Vegetables,110.2,1,STORE-NORTH
+SKU-000002,Tomato Local,Fruits & Vegetables,75.4,1,STORE-SOUTH
+SKU-000003,Onion,Fruits & Vegetables,145.0,2,STORE-CENTRAL
+SKU-000003,Onion,Fruits & Vegetables,130.8,2,STORE-NORTH
+SKU-000003,Onion,Fruits & Vegetables,115.3,2,STORE-SOUTH
+SKU-000004,Toned Milk 500ml,Dairy & Eggs,200.0,1,STORE-CENTRAL
+SKU-000004,Toned Milk 500ml,Dairy & Eggs,180.5,1,STORE-NORTH
+SKU-000004,Toned Milk 500ml,Dairy & Eggs,160.2,1,STORE-SOUTH
+SKU-000005,Full Cream Milk 1L,Dairy & Eggs,175.8,1,STORE-CENTRAL
+SKU-000005,Full Cream Milk 1L,Dairy & Eggs,155.0,1,STORE-NORTH
+SKU-000005,Full Cream Milk 1L,Dairy & Eggs,140.3,1,STORE-SOUTH
+SKU-000006,Curd 400g,Dairy & Eggs,95.0,1,STORE-CENTRAL
+SKU-000006,Curd 400g,Dairy & Eggs,88.3,1,STORE-NORTH
+SKU-000006,Curd 400g,Dairy & Eggs,72.6,1,STORE-SOUTH
+SKU-000007,Basmati Rice 5kg,Staples & Grains,60.0,5,STORE-CENTRAL
+SKU-000007,Basmati Rice 5kg,Staples & Grains,45.5,5,STORE-NORTH
+SKU-000007,Basmati Rice 5kg,Staples & Grains,52.8,5,STORE-SOUTH
+SKU-000008,Wheat Flour 5kg,Staples & Grains,55.2,4,STORE-CENTRAL
+SKU-000008,Wheat Flour 5kg,Staples & Grains,48.0,4,STORE-NORTH
+SKU-000008,Wheat Flour 5kg,Staples & Grains,42.5,4,STORE-SOUTH
+SKU-000009,Sunflower Oil 1L,Staples & Grains,40.0,5,STORE-CENTRAL
+SKU-000009,Sunflower Oil 1L,Staples & Grains,35.2,5,STORE-NORTH
+SKU-000009,Sunflower Oil 1L,Staples & Grains,38.7,5,STORE-SOUTH
+SKU-000010,Coca Cola 750ml,Beverages,80.0,4,STORE-CENTRAL
+SKU-000010,Coca Cola 750ml,Beverages,95.5,4,STORE-NORTH
+SKU-000010,Coca Cola 750ml,Beverages,70.3,4,STORE-SOUTH
+SKU-000011,Filter Coffee 200g,Beverages,30.5,5,STORE-CENTRAL
+SKU-000011,Filter Coffee 200g,Beverages,25.0,5,STORE-NORTH
+SKU-000011,Filter Coffee 200g,Beverages,28.8,5,STORE-SOUTH
+SKU-000012,Bread White,Bakery & Snacks,85.0,2,STORE-CENTRAL
+SKU-000012,Bread White,Bakery & Snacks,78.3,2,STORE-NORTH
+SKU-000012,Bread White,Bakery & Snacks,65.0,2,STORE-SOUTH
+SKU-000013,Chicken Breast 500g,Meat & Seafood,45.0,1,STORE-CENTRAL
+SKU-000013,Chicken Breast 500g,Meat & Seafood,38.5,1,STORE-NORTH
+SKU-000013,Chicken Breast 500g,Meat & Seafood,42.0,1,STORE-SOUTH
+SKU-000014,Turmeric Powder 200g,Spices & Masala,22.0,7,STORE-CENTRAL
+SKU-000014,Turmeric Powder 200g,Spices & Masala,18.5,7,STORE-NORTH
+SKU-000014,Turmeric Powder 200g,Spices & Masala,20.3,7,STORE-SOUTH
+SKU-000015,Surf Excel 1kg,Household Items,35.0,7,STORE-CENTRAL
+SKU-000015,Surf Excel 1kg,Household Items,30.2,7,STORE-NORTH
+SKU-000015,Surf Excel 1kg,Household Items,28.0,7,STORE-SOUTH
+SKU-000016,Cashew Whole 250g,Dry Fruits & Nuts,15.0,10,STORE-CENTRAL
+SKU-000016,Cashew Whole 250g,Dry Fruits & Nuts,12.5,10,STORE-NORTH
+SKU-000016,Cashew Whole 250g,Dry Fruits & Nuts,10.8,10,STORE-SOUTH
+SKU-000017,Prawns Medium 500g,Meat & Seafood,20.0,1,STORE-CENTRAL
+SKU-000017,Prawns Medium 500g,Meat & Seafood,15.5,1,STORE-NORTH
+SKU-000017,Prawns Medium 500g,Meat & Seafood,18.2,1,STORE-SOUTH
+SKU-000018,Dove Shampoo 340ml,Personal Care,25.0,10,STORE-CENTRAL
+SKU-000018,Dove Shampoo 340ml,Personal Care,22.3,10,STORE-NORTH
+SKU-000018,Dove Shampoo 340ml,Personal Care,19.8,10,STORE-SOUTH
+SKU-000019,Potato,Fruits & Vegetables,160.0,2,STORE-CENTRAL
+SKU-000019,Potato,Fruits & Vegetables,140.5,2,STORE-NORTH
+SKU-000019,Potato,Fruits & Vegetables,135.0,2,STORE-SOUTH
+SKU-000020,Paneer 200g,Dairy & Eggs,65.0,1,STORE-CENTRAL
+SKU-000020,Paneer 200g,Dairy & Eggs,58.2,1,STORE-NORTH
+SKU-000020,Paneer 200g,Dairy & Eggs,50.5,1,STORE-SOUTH

@@ -1,6 +1,8 @@
 import numpy as np
 import random
 
+SHELF_LIFE_HORIZON = 14
+
 
 # ── Per-category economics for category-aware Q-tables ──────────────
 # Format: (holding_cost, stockout_cost, spoilage_rate, waste_unit_cost)
@@ -49,31 +51,50 @@ class StochasticSCMSimulator:
         else:
             self.spoilage_rate = spoilage_rate
 
-    def step(self, inventory, demand, promo_active, arrival_qty):
-        # 1. Stochastic Arrivals (Variable delivery times)
-        inventory += arrival_qty
+    def step(self, age_matrix: np.ndarray, fresh_overflow: float, demand: float, promo_active: bool, arrival_qty: float, shelf_life: int):
+        # 1. Aging and Spoilage (Bucket 0 expires)
+        spoiled_qty = float(age_matrix[0])
+        
+        # Shift matrix left (items age by 1 period)
+        age_matrix[:-1] = age_matrix[1:]
+        age_matrix[-1] = 0.0
+        
+        # Transfer from overflow into the newest bucket (approximate)
+        transfer = fresh_overflow * 0.05
+        age_matrix[-1] += transfer
+        fresh_overflow -= transfer
 
-        # 2. Spoilage — compute spoiled quantity explicitly
-        spoiled_qty = inventory * self.spoilage_rate
-        inventory -= spoiled_qty
+        # 2. Inbound Freight (deposit into correct bucket)
+        if shelf_life <= SHELF_LIFE_HORIZON:
+            idx = max(0, shelf_life - 1)
+            age_matrix[idx] += arrival_qty
+        else:
+            fresh_overflow += arrival_qty
 
-        # 3. Fulfillment
-        sold = min(inventory, demand)
-        inventory -= sold
-        unmet = demand - sold
+        # 3. Fulfillment (FEFO)
+        unmet = demand
+        for i in range(SHELF_LIFE_HORIZON):
+            if unmet <= 0:
+                break
+            sold = min(age_matrix[i], unmet)
+            age_matrix[i] -= sold
+            unmet -= sold
+            
+        if unmet > 0:
+            sold = min(fresh_overflow, unmet)
+            fresh_overflow -= sold
+            unmet -= sold
 
         # 4. Strategic Costing
-        #    - Stockout: higher pain during promos
-        #    - Holding: per-unit storage cost
-        #    - Wastage: per-unit penalty for spoiled goods (key for perishables)
+        total_inv = float(np.sum(age_matrix) + fresh_overflow)
         multiplier = 5.0 if promo_active else 1.0
         cost = (
             (unmet * self.stockout_cost * multiplier)
-            + (inventory * self.holding_cost)
+            + (total_inv * self.holding_cost)
             + (spoiled_qty * self.waste_unit_cost)
         )
 
-        return max(0, inventory), cost, unmet
+        return age_matrix, fresh_overflow, cost, unmet
 
 
 # Order targets for different modes
@@ -116,33 +137,33 @@ def train_agent_stochastic(sim, agent, df, epochs=250):
     arrivals = np.zeros(n + max_eta_offset, dtype=np.float32)
 
     for epoch in range(epochs):
-        inv = 5000.0
+        age_matrix = np.zeros(SHELF_LIFE_HORIZON, dtype=np.float32)
+        fresh_overflow = 5000.0  # start with bulk inventory
+        shelf_life = 30  # arbitrary for QL synthetic training
         epoch_reward = 0.0
         pipeline_sum = 0.0
         arrivals.fill(0)
 
         for t in range(n - 1):
-            # Orders arriving today
             arrival_today = arrivals[t]
             pipeline_sum -= arrival_today
-
-            action = agent.act(inv, pipeline_sum, signals[t])
+            
+            total_inv = np.sum(age_matrix) + fresh_overflow
+            action = agent.act(total_inv, pipeline_sum, signals[t])
 
             if action > 0:
-                # Training with Poisson noise in the lead time
                 eta_offset = int(np.random.poisson(sim.lead_time))
                 eta_offset = min(eta_offset, max_eta_offset - 1)
                 eta = t + eta_offset
                 arrivals[eta] += action
                 pipeline_sum += action
 
-            n_inv, cost, _ = sim.step(inv, demand[t], signals[t], arrival_today)
+            age_matrix, fresh_overflow, cost, _ = sim.step(age_matrix, fresh_overflow, demand[t], signals[t], arrival_today, shelf_life)
             
-            # Forecast the state of the pipeline at the start of t+1
             n_ps = pipeline_sum - arrivals[t + 1]
+            n_inv = np.sum(age_matrix) + fresh_overflow
             
-            agent.learn(inv, pipeline_sum, signals[t], action, -cost, n_inv, n_ps, signals[t + 1])
-            inv = n_inv
+            agent.learn(total_inv, pipeline_sum, signals[t], action, -cost, n_inv, n_ps, signals[t + 1])
             epoch_reward -= cost
 
         history.append(epoch_reward / n)
