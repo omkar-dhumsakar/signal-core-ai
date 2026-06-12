@@ -12,8 +12,23 @@ import time
 import numpy as np
 import torch
 from datetime import datetime, date, timedelta
+from typing import Dict, List, Optional, Tuple
+import structlog
+import logging
 import pickle
 from pydantic import BaseModel, Field
+
+structlog.configure(
+    processors=[
+        structlog.stdlib.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.JSONRenderer()
+    ],
+    wrapper_class=structlog.stdlib.BoundLogger,
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+)
+logger = structlog.get_logger()
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -188,7 +203,7 @@ def _load_catalog_from_csv() -> dict:
     import pandas as pd
 
     if not os.path.exists(_CSV_PATH):
-        print(f"[rl_bridge] WARNING: CSV not found at {_CSV_PATH}, using empty catalog")
+        logger.warning("CSV not found, using empty catalog", path=_CSV_PATH)
         return {}
 
     df = pd.read_csv(_CSV_PATH)
@@ -483,12 +498,12 @@ class RLBridge:
                     agent.epsilon = state["epsilon"]
                     self.agents[cat] = agent
 
-                print(f"[rl_bridge] Loaded {len(self.agents)} DQN v2 agents from cache")
+                logger.info("Loaded DQN v2 agents from cache", count=len(self.agents))
                 return
             except Exception as e:
-                print(f"[rl_bridge] DQN cache load failed ({e}), retraining...")
+                logger.error("DQN cache load failed, retraining", error=str(e))
 
-        t0 = time.time()
+        start_time = time.time()
         catalog = self.get_full_catalog()
 
         # Group SKUs by category
@@ -523,6 +538,7 @@ class RLBridge:
         targets = HOURLY_TARGETS if DARK_STORE_MODE else None
 
         for cat, skus in cat_skus.items():
+            t0 = time.time()
             h, s, sp, wc = get_category_sim_params(cat)
             lead_times = [catalog[sk].get("lead_time", 3) for sk in skus]
             avg_lead = max(1, int(round(sum(lead_times) / len(lead_times))))
@@ -560,11 +576,10 @@ class RLBridge:
             agent.epsilon = 0.05
             self.agents[cat] = agent
             self.sims[cat] = sim
-            print(f"[rl_bridge] DQN trained: {cat} ({len(skus)} SKUs, "
-                  f"sampled {sample_count})")
+            logger.info("DQN trained", category=cat, skus=len(skus), time_ms=round(time.time() - t0, 3) * 1000)
 
-        elapsed = time.time() - t0
-        print(f"[rl_bridge] Trained {len(self.agents)} DQN agents in {elapsed:.1f}s")
+        elapsed = time.time() - start_time
+        logger.info("Trained DQN agents", count=len(self.agents), elapsed_sec=round(elapsed, 1))
 
         # Save DQN cache
         try:
@@ -585,9 +600,9 @@ class RLBridge:
                 "cat_to_idx": self._cat_to_idx,
                 "sku_metadata": self._sku_metadata,
             }, self._DQN_CACHE_PATH)
-            print(f"[rl_bridge] DQN cache saved to {self._DQN_CACHE_PATH}")
+            logger.info("DQN cache saved", path=self._DQN_CACHE_PATH)
         except Exception as e:
-            print(f"[rl_bridge] DQN cache save failed: {e}")
+            logger.error("DQN cache save failed", error=str(e))
 
     # ── Q-Learning training path (fallback) ───────────────────────
 
@@ -601,23 +616,23 @@ class RLBridge:
                 self.agents = cached["agents"]
                 self.sims = cached["sims"]
                 self._sku_cluster = cached["sku_cluster"]
-                print(f"[rl_bridge] Loaded {len(self.agents)} QL agents from cache")
+                logger.info("Loaded QL agents from cache", count=len(self.agents))
                 return
             except Exception as e:
-                print(f"[rl_bridge] QL cache load failed ({e}), retraining...")
+                logger.error("QL cache load failed, retraining", error=str(e))
 
-        t0 = time.time()
+        start_time = time.time()
         catalog = self.get_full_catalog()
         clusters = self._build_clusters(catalog)
 
         try:
             profiles = load_sku_demand_profiles(_CSV_PATH)
             use_real_data = True
-            print(f"[rl_bridge] Loaded real demand profiles for {len(profiles)} SKUs")
+            logger.info("Loaded real demand profiles", count=len(profiles))
         except Exception as e:
             profiles = {}
             use_real_data = False
-            print(f"[rl_bridge] WARNING: Could not load demand profiles ({e})")
+            logger.warning("Could not load demand profiles, falling back to synthetic", error=str(e))
 
         for cluster_key, sku_list in clusters.items():
             cat = cluster_key.rsplit("_", 1)[0]
@@ -656,8 +671,8 @@ class RLBridge:
             self.agents[cluster_key] = agent
             self.sims[cluster_key] = sim
 
-        elapsed = time.time() - t0
-        print(f"[rl_bridge] Trained {len(self.agents)} QL cluster agents in {elapsed:.1f}s")
+        elapsed = time.time() - start_time
+        logger.info("Trained QL cluster agents", count=len(self.agents), elapsed_sec=round(elapsed, 1))
 
         try:
             with open(self._QL_CACHE_PATH, "wb") as f:
@@ -666,9 +681,9 @@ class RLBridge:
                     "sims": self.sims,
                     "sku_cluster": self._sku_cluster,
                 }, f)
-            print(f"[rl_bridge] QL cache saved to {self._QL_CACHE_PATH}")
+            logger.info("QL cache saved", path=self._QL_CACHE_PATH)
         except Exception as e:
-            print(f"[rl_bridge] QL cache save failed: {e}")
+            logger.error("QL cache save failed", error=str(e))
 
     def _get_agent_for_sku(self, sku: str):
         """Return the agent for a SKU (DQN or QLearning depending on mode)."""
@@ -770,7 +785,7 @@ class RLBridge:
                             metadata=metadata, epochs=3)
 
         self._ppo_agents[cat] = ppo_agent
-        print(f"[rl_bridge] PPO agent trained for category: {cat}")
+        logger.info("PPO agent trained", category=cat)
         return ppo_agent
 
     def _get_rl_action(self, sku: str, store_id: str | None = None) -> int | float:
