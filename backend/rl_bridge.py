@@ -12,11 +12,8 @@ import time
 import numpy as np
 import torch
 from datetime import datetime, date, timedelta
-from typing import Dict, List, Optional, Tuple
 import structlog
-import logging
 import pickle
-from pydantic import BaseModel, Field
 
 structlog.configure(
     processors=[
@@ -39,13 +36,11 @@ from SignalCoreAI.scm_engine import (
     train_agent_from_demand_series,
     get_category_sim_params,
     HOURLY_TARGETS,
-    DAILY_TARGETS,
     SHELF_LIFE_HORIZON,
 )
 from SignalCoreAI.dqn_engine import (
     DQNAgent,
     train_dqn_stochastic,
-    train_dqn_from_demand_series,
     PIPELINE_HORIZON,
     MAX_PIPELINE_SEQUENCE,
     DEFAULT_NUM_CATEGORIES,
@@ -53,7 +48,7 @@ from SignalCoreAI.dqn_engine import (
 )
 from SignalCoreAI.ppo_engine import PPOAgent, train_ppo_stochastic
 from SignalCoreAI.network_coordinator import (
-    NetworkCoordinator, StoreCapacity, SupplierCapacity,
+    NetworkCoordinator, StoreCapacity,
 )
 from SignalCoreAI.data_utils import generate_demand_signals, load_sku_demand_profiles
 
@@ -456,7 +451,6 @@ class RLBridge:
         with per-SKU embeddings.  Otherwise falls back to tabular
         Q-Learning agents per (category × velocity) cluster.
         """
-        import pickle, time
 
         self.is_training = True
 
@@ -470,7 +464,6 @@ class RLBridge:
     # ── DQN training path ─────────────────────────────────────────
 
     def _load_or_train_dqn(self, force=False):
-        import time
 
         # Try loading cached DQN weights
         if not force and os.path.exists(self._DQN_CACHE_PATH):
@@ -607,7 +600,6 @@ class RLBridge:
     # ── Q-Learning training path (fallback) ───────────────────────
 
     def _load_or_train_ql(self, force=False):
-        import pickle, time
 
         if not force and os.path.exists(self._QL_CACHE_PATH):
             try:
@@ -882,6 +874,9 @@ class RLBridge:
             return round(float(probs.max().item()), 2)
 
         # Tabular Q-learning fallback
+        inv_scaled = float(np.sum(age_mat) + fresh_ovr)
+        pipe_scaled = float(state.get("pipeline_sum", 0.0) * 50)
+        
         s = agent.get_state(inv_scaled, pipe_scaled, state["signal"])
         if s in agent.q:
             q_vals = agent.q[s]
@@ -982,7 +977,6 @@ class RLBridge:
                             limit: int = 25, store_id: str | None = None) -> list:
                             
         # Check cache (invalidate after 5 minutes)
-        import time
         now = time.time()
         sid = store_id or "DS-BLR-INDIRANAGAR"
         cache_key = f"{sid}_{category_filter or 'ALL'}"

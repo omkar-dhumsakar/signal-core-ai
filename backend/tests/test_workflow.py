@@ -8,7 +8,6 @@ def test_end_to_end_workflow():
     # 1. Login
     login_resp = client.post("/api/v1/auth/login", json={"username": "manager1", "password": "storeops123"})
     assert login_resp.status_code == 200
-    token = login_resp.json()["token"]
     
     # 2. Get Directives
     dir_resp = client.get("/api/v1/directives")
