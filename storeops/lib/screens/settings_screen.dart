@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
-// ignore: avoid_web_libraries_in_flutter
-import 'dart:html' as html;
-import 'dart:typed_data';
+import 'package:file_picker/file_picker.dart';
 import 'package:provider/provider.dart';
 import '../providers/auth_provider.dart';
 import '../providers/directives_provider.dart';
@@ -22,23 +20,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String? _error;
 
   Future<void> _pickAndUpload() async {
-    // Use native browser file input for web compatibility
-    final html.FileUploadInputElement uploadInput =
-        html.FileUploadInputElement();
-    uploadInput.accept = '.csv,.xlsx';
-    uploadInput.click();
+    try {
+      FilePickerResult? result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['csv', 'xlsx'],
+        withData: true,
+      );
 
-    uploadInput.onChange.listen((event) async {
-      final files = uploadInput.files;
-      if (files == null || files.isEmpty) return;
-
-      final html.File file = files.first;
-      final reader = html.FileReader();
-
-      reader.readAsArrayBuffer(file);
-      reader.onLoadEnd.listen((event) async {
-        final Uint8List fileBytes =
-            Uint8List.fromList(reader.result as List<int>);
+      if (result != null && result.files.isNotEmpty) {
+        final file = result.files.first;
+        if (file.bytes == null) return;
 
         setState(() {
           _uploading = true;
@@ -46,39 +37,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _lastResult = null;
         });
 
-        try {
-          final response =
-              await _api.uploadSupplierFile(fileBytes, file.name);
-          if (!mounted) return;
-          setState(() {
-            _lastResult = response;
-            _uploading = false;
-          });
-          final ins = response['inserted'] ?? 0;
-          final upd = response['updated'] ?? 0;
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('Upload successful: $ins added, $upd updated'),
-            backgroundColor: StoreOpsColors.of(context).success,
-            behavior: SnackBarBehavior.floating,
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          ));
-        } catch (e) {
-          if (!mounted) return;
-          setState(() {
-            _error = e.toString();
-            _uploading = false;
-          });
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('Upload failed: $e'),
-            backgroundColor: StoreOpsColors.of(context).critical,
-            behavior: SnackBarBehavior.floating,
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          ));
-        }
+        final response = await _api.uploadSupplierFile(file.bytes!, file.name);
+        if (!mounted) return;
+        setState(() {
+          _lastResult = response;
+          _uploading = false;
+        });
+        final ins = response['inserted'] ?? 0;
+        final upd = response['updated'] ?? 0;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Upload successful: $ins added, $upd updated'),
+          backgroundColor: StoreOpsColors.of(context).success,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ));
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.toString();
+        _uploading = false;
       });
-    });
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Upload failed: $e'),
+        backgroundColor: StoreOpsColors.of(context).critical,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ));
+    }
   }
 
   @override
