@@ -1217,7 +1217,19 @@ class RLBridge:
         return directives, summary
 
     def confirm_order(self, sku: str, quantity: int):
-        self.inventory_state[sku]["pipeline"] += quantity
+        # Update scalar sum
+        if "pipeline_sum" in self.inventory_state[sku]:
+            self.inventory_state[sku]["pipeline_sum"] += quantity
+        else:
+            self.inventory_state[sku]["pipeline_sum"] = quantity
+            
+        # Update sequence
+        eta = self.get_effective_lead_time(sku)
+        if "pipeline_seq" in self.inventory_state[sku]:
+            self.inventory_state[sku]["pipeline_seq"].append([quantity, eta])
+        else:
+            self.inventory_state[sku]["pipeline_seq"] = [[quantity, eta]]
+            
         self.confirmed_orders.append(
             {
                 "sku": sku,
@@ -1241,7 +1253,18 @@ class RLBridge:
             }
         )
         if adjustment.adjusted_qty > 0:
-            self.inventory_state[adjustment.sku]["pipeline"] += adjustment.adjusted_qty
+            sku = adjustment.sku
+            qty = adjustment.adjusted_qty
+            if "pipeline_sum" in self.inventory_state[sku]:
+                self.inventory_state[sku]["pipeline_sum"] += qty
+            else:
+                self.inventory_state[sku]["pipeline_sum"] = qty
+                
+            eta = self.get_effective_lead_time(sku)
+            if "pipeline_seq" in self.inventory_state[sku]:
+                self.inventory_state[sku]["pipeline_seq"].append([qty, eta])
+            else:
+                self.inventory_state[sku]["pipeline_seq"] = [[qty, eta]]
         return feedback_id
 
     def update_inventory(self, sku: str, new_qty: int) -> InventoryAuditResponse:

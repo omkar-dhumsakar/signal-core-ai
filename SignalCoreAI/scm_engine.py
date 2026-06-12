@@ -190,7 +190,9 @@ def train_agent_from_demand_series(
     arrivals = np.zeros(n + max_eta_offset, dtype=np.float32)
 
     for epoch in range(epochs):
-        inv = 5000.0
+        age_matrix = np.zeros(SHELF_LIFE_HORIZON, dtype=np.float32)
+        fresh_overflow = 5000.0  # start with bulk inventory
+        shelf_life = 30  # arbitrary for QL synthetic training
         epoch_reward = 0.0
         pipeline_sum = 0.0
         arrivals.fill(0)
@@ -198,8 +200,10 @@ def train_agent_from_demand_series(
         for t in range(n - 1):
             arrival_today = arrivals[t]
             pipeline_sum -= arrival_today
+            
+            total_inv = np.sum(age_matrix) + fresh_overflow
 
-            action = agent.act(inv, pipeline_sum, signals[t])
+            action = agent.act(total_inv, pipeline_sum, signals[t])
 
             if action > 0:
                 eta_offset = int(np.random.poisson(sim.lead_time))
@@ -208,12 +212,13 @@ def train_agent_from_demand_series(
                 arrivals[eta] += action
                 pipeline_sum += action
 
-            n_inv, cost, _ = sim.step(inv, demand[t], signals[t], arrival_today)
+            age_matrix, fresh_overflow, cost, _ = sim.step(age_matrix, fresh_overflow, demand[t], signals[t], arrival_today, shelf_life)
             
             n_ps = pipeline_sum - arrivals[t + 1]
-            agent.learn(inv, pipeline_sum, signals[t], action, -cost, n_inv, n_ps, signals[t + 1])
+            n_inv = np.sum(age_matrix) + fresh_overflow
             
-            inv = n_inv
+            agent.learn(total_inv, pipeline_sum, signals[t], action, -cost, n_inv, n_ps, signals[t + 1])
+            
             epoch_reward -= cost
 
         history.append(epoch_reward / n)

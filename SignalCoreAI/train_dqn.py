@@ -11,8 +11,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from SignalCoreAI.scm_engine import StochasticSCMSimulator, HOURLY_TARGETS, get_category_sim_params
 from SignalCoreAI.data_utils import generate_demand_signals, load_sku_demand_profiles
 from SignalCoreAI.dqn_engine import (
-    DQNAgent, _build_pipeline_window, _build_state_array,
-    PIPELINE_HORIZON, DEFAULT_METADATA_DIM,
+    DQNAgent, PIPELINE_HORIZON, DEFAULT_METADATA_DIM,
 )
 
 # Category → integer index mapping for category embedding
@@ -100,9 +99,10 @@ def train_dqn(epochs=50, cluster_size=10, data_mode="real"):
     history = []
 
     # 4. Training Loop
+    from SignalCoreAI.dqn_engine import train_dqn_from_demand_series
+
     for epoch in range(epochs):
         epoch_rewards = []
-        epoch_losses = []
 
         # Shuffle SKUs each epoch to prevent bias
         random.shuffle(training_skus)
@@ -126,73 +126,22 @@ def train_dqn(epochs=50, cluster_size=10, data_mode="real"):
                 time_unit="days"
             )
 
-            inv = 100.0
-            n = len(demand)
-            max_eta_offset = 20
-            arrivals = np.zeros(n + max_eta_offset, dtype=np.float32)
-            horizon = agent.pipeline_horizon
+            agent, hist = train_dqn_from_demand_series(
+                sim, agent, demand, signals,
+                sku_id=sku_idx, cat_id=cat_idx, metadata=metadata,
+                epochs=1
+            )
+            
+            if hist:
+                epoch_rewards.append(hist[0])
 
-            sku_reward = 0.0
-
-            for t in range(n - 1):
-                arrival_today = arrivals[t]
-
-                # Build pipeline window (chronological arrivals)
-                pipe_window = _build_pipeline_window(arrivals, t, horizon)
-                current_state = _build_state_array(inv, signals[t], pipe_window, horizon)
-
-                # Action with full context (SKU + category + metadata)
-                action = agent.act(inv, pipe_window, signals[t],
-                                   sku_id=sku_idx, cat_id=cat_idx,
-                                   metadata=metadata)
-                action_idx = targets.index(action)
-
-                # Update Arrivals
-                if action > 0:
-                    eta_offset = int(np.random.poisson(sim.lead_time))
-                    eta_offset = min(eta_offset, max_eta_offset - 1)
-                    eta = t + eta_offset
-                    if eta < len(arrivals):
-                        arrivals[eta] += action
-
-                # Simulation Step
-                n_inv, cost, unmet = sim.step(inv, demand[t], signals[t], arrival_today)
-                reward = -cost
-
-                # Next State with pipeline window
-                next_pipe_window = _build_pipeline_window(arrivals, t + 1, horizon)
-                next_state = _build_state_array(n_inv, signals[t + 1], next_pipe_window, horizon)
-
-                # Memory (prioritized replay)
-                done = 1.0 if t == n - 2 else 0.0
-                if agent.use_prioritized_replay:
-                    agent.memory.push(
-                        current_state, sku_idx, cat_idx, metadata,
-                        action_idx, reward,
-                        next_state, sku_idx, cat_idx, metadata, done
-                    )
-                else:
-                    agent.memory.push(current_state, sku_idx, action_idx, reward,
-                                      next_state, sku_idx, done)
-
-                # Optimization Step
-                loss = agent.learn()
-                if loss is not None:
-                    epoch_losses.append(loss)
-
-                inv = n_inv
-                sku_reward += reward
-
-            epoch_rewards.append(sku_reward / n)
-
-        avg_reward = np.mean(epoch_rewards)
-        avg_loss = np.mean(epoch_losses) if epoch_losses else 0
+        avg_reward = np.mean(epoch_rewards) if epoch_rewards else 0.0
         history.append(avg_reward)
 
         if (epoch + 1) % 5 == 0 or epoch == 0:
             print(f"Epoch {epoch+1}/{epochs} | Avg Cluster Reward: {avg_reward:.2f} | "
-                  f"Avg Loss: {avg_loss:.4f} | Epsilon: {agent.epsilon:.3f} | "
-                  f"PER Beta: {agent._beta:.3f}")
+                  f"Epsilon: {agent.epsilon:.3f} | "
+                  f"PER Beta: {getattr(agent, '_beta', 0.0):.3f}")
 
     # 5. Export Scaled Model
     model_path = os.path.join(os.path.dirname(__file__), "dqn_weights_scaled_v1.pt")
