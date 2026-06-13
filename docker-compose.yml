@@ -23,6 +23,11 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
   backend-api:
     build:
       context: .
@@ -32,8 +37,10 @@ services:
     environment:
       - MODE=api
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - REDIS_URL=redis://redis:6379/0
     depends_on:
       - kafka
+      - redis
 
   backend-worker:
     build:
@@ -42,5 +49,7 @@ services:
     environment:
       - MODE=worker
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - REDIS_URL=redis://redis:6379/0
     depends_on:
       - kafka
+      - redis
