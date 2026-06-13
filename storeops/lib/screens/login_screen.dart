@@ -78,7 +78,6 @@ class _LoginScreenState extends State<LoginScreen>
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
     final size = MediaQuery.of(context).size;
 
     return Scaffold(

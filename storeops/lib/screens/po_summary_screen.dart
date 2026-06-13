@@ -5,7 +5,7 @@ import 'package:flutter/services.dart';
 class POSummaryScreen extends StatelessWidget {
   final List<PurchaseOrder> purchaseOrders;
 
-  const POSummaryScreen({Key? key, required this.purchaseOrders}) : super(key: key);
+  const POSummaryScreen({super.key, required this.purchaseOrders});
 
   void _copyToClipboard(BuildContext context) {
     if (purchaseOrders.isEmpty) {
@@ -60,11 +60,11 @@ class POSummaryScreen extends StatelessWidget {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(Icons.inventory_2_outlined, size: 64, color: cs.onSurface.withOpacity(0.3)),
+                  Icon(Icons.inventory_2_outlined, size: 64, color: cs.onSurface.withValues(alpha: 0.3)),
                   const SizedBox(height: 16),
                   Text(
                     'No orders to generate.',
-                    style: TextStyle(fontSize: 16, color: cs.onSurface.withOpacity(0.7)),
+                    style: TextStyle(fontSize: 16, color: cs.onSurface.withValues(alpha: 0.7)),
                   ),
                 ],
               ),
@@ -160,7 +160,7 @@ class POSummaryScreen extends StatelessWidget {
                                     ),
                                     Text(
                                       '${item.sku} • ₹${item.baseCost.toStringAsFixed(2)}/unit',
-                                      style: TextStyle(fontSize: 12, color: cs.onSurface.withOpacity(0.6)),
+                                      style: TextStyle(fontSize: 12, color: cs.onSurface.withValues(alpha: 0.6)),
                                     ),
                                   ],
                                 ),
@@ -171,7 +171,7 @@ class POSummaryScreen extends StatelessWidget {
                               ),
                             ],
                           ),
-                        )).toList(),
+                        )),
                       ],
                     ),
                   ),

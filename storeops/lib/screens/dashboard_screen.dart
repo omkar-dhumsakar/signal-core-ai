@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/directives_provider.dart';
 import '../widgets/directive_card.dart';
-import '../theme/app_theme.dart';
 
 class DashboardScreen extends StatelessWidget {
   const DashboardScreen({super.key});
@@ -10,8 +9,6 @@ class DashboardScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<DirectivesProvider>();
-    final cs = Theme.of(context).colorScheme;
-    final ext = StoreOpsColors.of(context);
 
     // Calculate metrics
     int criticalCount = 0;
@@ -70,7 +67,7 @@ class DashboardScreen extends StatelessWidget {
                 if (provider.isOffline)
                   Container(
                     padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(color: Colors.red.withOpacity(0.2), borderRadius: BorderRadius.circular(8)),
+                    decoration: BoxDecoration(color: Colors.red.withValues(alpha: 0.2), borderRadius: BorderRadius.circular(8)),
                     child: const Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
@@ -125,8 +122,8 @@ class _KpiCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.1),
-        border: Border.all(color: color.withOpacity(0.3)),
+        color: color.withValues(alpha: 0.1),
+        border: Border.all(color: color.withValues(alpha: 0.3)),
         borderRadius: BorderRadius.circular(12),
       ),
       child: Row(
@@ -140,7 +137,7 @@ class _KpiCard extends StatelessWidget {
               Text(value, style: const TextStyle(color: Colors.white, fontSize: 32, fontWeight: FontWeight.w900)),
             ],
           ),
-          Icon(icon, color: color.withOpacity(0.8), size: 40),
+          Icon(icon, color: color.withValues(alpha: 0.8), size: 40),
         ],
       ),
     );
