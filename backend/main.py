@@ -3,14 +3,17 @@
 FastAPI bridge between the RL Supply Chain Agent and the StoreOps mobile app.
 """
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Query, BackgroundTasks
+from fastapi import FastAPI, HTTPException, UploadFile, File, Query, BackgroundTasks, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import date, timedelta
 from typing import List, Optional
 import uuid
 import threading
-import logging
 import structlog
+import hmac
+import hashlib
+import base64
+import os
 
 structlog.configure(
     processors=[
@@ -25,7 +28,6 @@ structlog.configure(
 logger = structlog.get_logger()
 
 from models import (
-    Directive,
     OrderConfirmRequest,
     OrderConfirmResponse,
     AdjustmentRequest,
@@ -39,7 +41,6 @@ from models import (
     LoginResponse,
     GoogleLoginRequest,
     ManagerInfo,
-    BudgetSummary,
     BudgetConfig,
     DirectivesResponse,
     DarkStore,
@@ -53,7 +54,6 @@ from models import (
 from rl_bridge import RLBridge, PRODUCT_CATALOG
 from data_utils import (
     init_db,
-    parse_supplier_csv,
     parse_supplier_dataframe,
     upsert_suppliers,
     get_all_supplier_links,
@@ -61,7 +61,7 @@ from data_utils import (
     get_manager_by_id,
     generate_pos_from_confirmed,
 )
-from kafka_gateway import KafkaConsumerWrapper, KafkaConfig
+from kafka_gateway import KafkaConsumerWrapper
 
 app = FastAPI(
     title="Signal Core AI — BigBasket Q-Commerce Engine",
@@ -281,6 +281,75 @@ def handle_forward_demand(payload: ForwardDemandPayload, background_tasks: Backg
     """
     background_tasks.add_task(_process_forward_demand, payload)
     return {"status": "queued", "event": "forward-demand"}
+
+# ── E-Commerce Webhooks (Shopify / WooCommerce) ───────────────────────
+
+SHOPIFY_SECRET = os.getenv("SHOPIFY_WEBHOOK_SECRET", "your_shopify_secret_here")
+WOOCOMMERCE_SECRET = os.getenv("WOOCOMMERCE_WEBHOOK_SECRET", "your_woocommerce_secret_here")
+
+async def verify_shopify_webhook(request: Request, x_shopify_hmac_sha256: str = Header(None)):
+    if not x_shopify_hmac_sha256:
+        raise HTTPException(status_code=401, detail="Missing HMAC signature")
+    body = await request.body()
+    digest = hmac.new(SHOPIFY_SECRET.encode('utf-8'), body, hashlib.sha256).digest()
+    computed_hmac = base64.b64encode(digest).decode('utf-8')
+    if not hmac.compare_digest(computed_hmac, x_shopify_hmac_sha256):
+        raise HTTPException(status_code=401, detail="Invalid HMAC signature")
+    return True
+
+@app.post("/api/v1/webhooks/shopify/orders-create")
+async def shopify_orders_create(request: Request, background_tasks: BackgroundTasks, x_shopify_hmac_sha256: str = Header(None)):
+    """Ingest a Shopify orders/create webhook."""
+    await verify_shopify_webhook(request, x_shopify_hmac_sha256)
+    payload = await request.json()
+    
+    # Extract line items
+    items = []
+    store_id = "DS-BLR-INDIRANAGAR" # Default store, can be mapped from Shopify location
+    
+    for line_item in payload.get("line_items", []):
+        sku = line_item.get("sku")
+        qty = line_item.get("quantity", 0)
+        if sku and qty > 0:
+            # Option A: Silently ignore unknown SKUs (handled naturally by _process_pos_batch skipping them)
+            items.append({"sku": sku, "quantity": qty, "store_id": store_id})
+            
+    if items:
+        batch = POSSaleBatch(items=items)
+        background_tasks.add_task(_process_pos_batch, batch)
+        
+    return {"status": "success"}
+
+async def verify_woocommerce_webhook(request: Request, x_wc_webhook_signature: str = Header(None)):
+    if not x_wc_webhook_signature:
+        raise HTTPException(status_code=401, detail="Missing WC Signature")
+    body = await request.body()
+    digest = hmac.new(WOOCOMMERCE_SECRET.encode('utf-8'), body, hashlib.sha256).digest()
+    computed_signature = base64.b64encode(digest).decode('utf-8')
+    if not hmac.compare_digest(computed_signature, x_wc_webhook_signature):
+        raise HTTPException(status_code=401, detail="Invalid WC Signature")
+    return True
+
+@app.post("/api/v1/webhooks/woocommerce/order-created")
+async def woocommerce_order_created(request: Request, background_tasks: BackgroundTasks, x_wc_webhook_signature: str = Header(None)):
+    """Ingest a WooCommerce order created webhook."""
+    await verify_woocommerce_webhook(request, x_wc_webhook_signature)
+    payload = await request.json()
+    
+    items = []
+    store_id = "DS-BLR-INDIRANAGAR"
+    
+    for line_item in payload.get("line_items", []):
+        sku = line_item.get("sku")
+        qty = line_item.get("quantity", 0)
+        if sku and qty > 0:
+            items.append({"sku": sku, "quantity": qty, "store_id": store_id})
+            
+    if items:
+        batch = POSSaleBatch(items=items)
+        background_tasks.add_task(_process_pos_batch, batch)
+        
+    return {"status": "success"}
 
 @app.get("/api/v1/categories")
 def get_categories():

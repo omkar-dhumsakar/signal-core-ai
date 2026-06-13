@@ -167,7 +167,7 @@ Contributions are welcome! We'd love help in these areas:
 ### 🔌 Integrations
 - [x] SAP ERP connector (via Kafka)
 - [x] Oracle ERP connector (via Kafka)
-- [ ] Shopify / WooCommerce webhooks
+- [x] Shopify / WooCommerce webhooks
 - [ ] Tally / QuickBooks integration
 
 ### 🏗️ Infrastructure
