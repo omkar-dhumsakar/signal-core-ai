@@ -37,7 +37,16 @@ Signal Core AI/
 
 ## Quick Start
 
-### 1. Backend (FastAPI)
+### 0. 🐳 Enterprise Docker Stack (Recommended)
+You can launch the entire ecosystem (FastAPI, Redis, Kafka, Zookeeper) with one command:
+```bash
+docker-compose up --build
+```
+The API will be available at `http://localhost:8002`.
+
+---
+
+### 1. Backend (FastAPI - Manual Setup)
 
 ```bash
 cd backend
@@ -147,8 +156,40 @@ Input: [Inventory, Pipeline, Signal] + SKU Embedding(dim=16)
 
 ## Contributing
 
-Contributions are welcome! Please:
+Contributions are welcome! We'd love help in these areas:
 
+### 🧠 RL & ML
+- [ ] PPO / SAC agent implementations
+- [ ] Demand forecasting models (Prophet, LSTM, Transformer)
+- [ ] Multi-agent coordination strategies
+- [ ] Reward function experimentation
+
+### 🔌 Integrations
+- [x] SAP ERP connector (via Kafka)
+- [x] Oracle ERP connector (via Kafka)
+- [ ] Shopify / WooCommerce webhooks
+- [ ] Tally / QuickBooks integration
+
+### 🏗️ Infrastructure
+- [x] Helm charts / Manifests for Kubernetes
+- [ ] Terraform modules for AWS/GCP
+- [x] Redis caching layer
+- [x] Dockerization & `docker-compose` stack
+- [ ] Horizontal scaling with Ray
+
+### 📱 Mobile App
+- [ ] iOS-specific optimizations
+- [ ] Offline-first improvements
+- [x] Dark mode enhancements (implemented via Dark TV background)
+- [ ] Accessibility (a11y) improvements
+
+### 📝 Documentation
+- [ ] Tutorials and walkthroughs
+- [ ] Architecture deep-dives
+- [ ] Video demos
+- [ ] Translations
+
+### How to Contribute
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
 3. Commit your changes (`git commit -m 'Add amazing feature'`)
